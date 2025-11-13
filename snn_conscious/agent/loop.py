@@ -20,6 +20,9 @@ import numpy as np
 from snn_conscious.envs.gridworld import GridWorld, GridConfig
 from snn_conscious.core.perception import PerceptionEncoder, PerceptionConfig
 from snn_conscious.core.world_model import WorldModelSNN, WorldModelConfig
+from snn_conscious.core.gws import GlobalWorkspace, GlobalWorkspaceConfig, GWSContent
+from snn_conscious.memory.working_memory import WorkingMemory, WorkingMemoryConfig, WMItem
+from snn_conscious.meta.self_model import SelfModel, SelfModelConfig
 from .policy_fast import FastPolicy, FastPolicyConfig
 from .curiosity import Curiosity, CuriosityConfig
 from snn_conscious.memory.episodic_memory import EpisodicMemory, EpisodicMemoryConfig
@@ -56,6 +59,23 @@ class AgentLoop:
         self.curiosity = curiosity
         self.memory = memory
         self.loop_cfg = loop_cfg
+        # 全局工作区、工作记忆、自我模型
+        self.gws = GlobalWorkspace(
+            GlobalWorkspaceConfig(
+                content_dim=self.wm.hidden_size,
+                ignition_threshold=0.5,
+                temperature=1.0,
+                stochastic=False,
+                topk_log_k=0,
+            )
+        )
+        self.working_memory = WorkingMemory(
+            WorkingMemoryConfig(content_dim=self.wm.hidden_size, capacity=32, decay=0.9)
+        )
+        self.self_model = SelfModel(
+            SelfModelConfig(input_dim=self.wm.hidden_size + 2, lr=0.05, think_threshold=0.6)
+        )
+
         self.replay = ReplayLearner(
             ReplayConfig(batch_size=loop_cfg.replay_batch, iters=loop_cfg.replay_iters),
             memory,
@@ -75,14 +95,43 @@ class AgentLoop:
             # 环境交互
             next_obs_raw, ext_rew, done, info = self.env.step(a_id)
             next_obs_vec = self.encoder.encode(next_obs_raw)
-            # 内在奖励
+            # 内在奖励与误差特征
             intrinsic = self.curiosity.compute(pred_obs, next_obs_vec, pred_rew, ext_rew)
+            obs_err = float(np.mean(np.abs(next_obs_vec - pred_obs)))
+            rew_err = abs(float(ext_rew) - float(pred_rew))
             # 组合奖励用于训练（可选）
             train_rew = ext_rew + (self.loop_cfg.intrinsic_coef * intrinsic if self.loop_cfg.combine_intrinsic_in_reward else 0.0)
             # 更新世界模型
             self.wm.update(pred_obs, next_obs_vec, pred_rew, train_rew)
+            # 更新自我模型（使用正外在奖励作为成功信号的简化近似）
+            sm_x = np.concatenate([state_h, np.array([obs_err, rew_err], dtype=float)])
+            self.self_model.update(sm_x, target_success=int(ext_rew > 0.0))
+
             # 写入记忆
             self.memory.add((obs_vec, a_onehot, next_obs_vec, train_rew, done, step))
+
+            # 构建 GWS 候选并竞争广播
+            candidates = [
+                GWSContent(vector=state_h, source="world_model", priority=float(intrinsic)),
+            ]
+            # 工作记忆聚合表示作为候选（低优先级）
+            wm_vec = self.working_memory.read_vector()
+            if np.any(wm_vec):
+                candidates.append(
+                    GWSContent(vector=wm_vec, source="working_memory", priority=0.1)
+                )
+            # 自我模型内容（使用 risk 作为优先级）
+            conf, risk, should = self.self_model.estimate(sm_x)
+            candidates.append(
+                GWSContent(vector=state_h, source="self_model", priority=float(risk))
+            )
+
+            selected, ign, strength, _info = self.gws.step(t=step, candidates=candidates)
+            if ign and selected is not None:
+                # 点火则将内容写入工作记忆
+                self.working_memory.add(
+                    WMItem(vector=selected.vector, source=selected.source, t=step, strength=1.0)
+                )
 
             total_reward += ext_rew
             intrinsic_total += intrinsic
@@ -132,4 +181,3 @@ def build_mvp(seed: Optional[int] = 0):
 
 
 __all__ = ["LoopConfig", "AgentLoop", "build_mvp"]
-

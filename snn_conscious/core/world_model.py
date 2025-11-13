@@ -317,5 +317,11 @@ class WorldModelSNN:
         self.t = 0
         logger.info("[WorldModel.reset_state] 状态已复位")
 
+    # 便捷属性
+    @property
+    def hidden_size(self) -> int:
+        """返回隐藏状态维度（便于其它模块对齐维度）。"""
+        return self.h.shape[0]
+
 
 __all__ = ["WorldModelConfig", "WorldModelSNN"]
