@@ -323,5 +323,12 @@ class WorldModelSNN:
         """返回隐藏状态维度（便于其它模块对齐维度）。"""
         return self.h.shape[0]
 
+    @property
+    def spike_rate(self) -> float:
+        """当前时间步的平均脉冲率（s 的均值）。"""
+        if self.s.size == 0:
+            return 0.0
+        return float(np.mean(self.s))
+
 
 __all__ = ["WorldModelConfig", "WorldModelSNN"]
