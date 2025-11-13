@@ -208,6 +208,29 @@ class WorldModelSNN:
 
         return pred_obs, pred_reward, self.h.copy()
 
+    def predict(
+        self, obs: np.ndarray, action: np.ndarray, context: Optional[np.ndarray] = None
+    ) -> Tuple[np.ndarray, float, np.ndarray]:
+        """在不改变内部状态的情况下，预测给定输入的输出。
+
+        该函数与 step 类似，但不写入 v/s/h/last_input 等内部变量，
+        便于策略在同一时刻评估多种动作的效果。
+        """
+        x = self._concat_input(obs, action, context)
+
+        v_new = (
+            self.cfg.leak * self.v
+            + self.W_in @ x
+            + self.W_rec @ self.s
+            + self.b_h
+        )
+        s_new = self._heaviside(v_new - self.cfg.threshold)
+        h_new = self.cfg.state_decay * self.h + (1.0 - self.cfg.state_decay) * s_new
+
+        pred_obs = self.W_ro_obs @ h_new + self.b_obs
+        pred_reward = float(np.dot(self.W_ro_rew, h_new) + self.b_rew)
+        return pred_obs, pred_reward, h_new
+
     # --------------------------- 学习（在线/离线） ---------------------------
     def update(
         self,
@@ -296,4 +319,3 @@ class WorldModelSNN:
 
 
 __all__ = ["WorldModelConfig", "WorldModelSNN"]
-
